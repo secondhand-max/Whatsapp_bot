@@ -1,101 +1,297 @@
-// -------------------- CONFIG --------------------
-const admin = "YOUR_NUMBER@c.us"; // replace with your WhatsApp number
-const openaiKey = "YOUR_OPENAI_API_KEY"; // replace with your OpenAI API key
+// UrbanPixel Complete WhatsApp/Instagram Bot Demo
 
-// -------------------- IMPORTS --------------------
-const { Client, LocalAuth } = require("whatsapp-web.js");
-const fs = require("fs");
-const OpenAI = require("openai");
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const qrcode = require('qrcode-terminal');
+const { Configuration, OpenAIApi } = require('openai');
 
-// -------------------- MENU --------------------
-const menu = {
-    coffee: ["Espresso", "Latte", "Cappuccino", "Mocha"],
-    tea: ["Black Tea", "Green Tea", "Herbal Tea"],
-    food: ["Sandwich", "Pizza", "Burger", "Salad"]
-};
+// Load API key from environment
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// -------------------- OPENAI --------------------
-const ai = new OpenAI({ apiKey: openaiKey });
-async function askAI(text) {
-    try {
-        const completion = await ai.chat.completions.create({
-            model: "gpt-4o-mini",
-            messages: [
-                { role: "system", content: "You are a friendly cafe assistant for WhatsApp. Be concise and helpful." },
-                { role: "user", content: text }
-            ]
-        });
-        return completion.choices[0].message.content;
-    } catch (e) {
-        console.log("AI error:", e);
-        return "Sorry, I couldn't process that right now 😔";
-    }
-}
+// OpenAI setup
+const openai = new OpenAIApi(new Configuration({ apiKey: OPENAI_API_KEY }));
 
-// -------------------- CLIENT --------------------
+// Puppeteer configuration for Replit
 const client = new Client({
     authStrategy: new LocalAuth(),
-    puppeteer: { headless: true }
+    puppeteer: {
+        headless: true,
+        executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium-browser',
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+    }
 });
 
-// -------------------- LOGGING --------------------
-function logMessage(author, message) {
-    const line = `${new Date().toISOString()} - ${author}: ${message}\n`;
-    fs.appendFileSync("logs.txt", line);
+// QR code for WhatsApp login
+client.on('qr', qr => {
+    qrcode.generate(qr, { small: true });
+    console.log('Scan this QR code with WhatsApp to connect!');
+});
+
+// Bot ready
+client.on('ready', () => console.log('Bot is ready! ✅'));
+
+// Demo mode
+let mode = 'WhatsApp';
+
+// Menu
+const MENU = {
+    drinks: { Latte: 250, Cappuccino: 220, Mocha: 300, Espresso: 200 },
+    food: { Croissant: 180, Sandwich: 350, Pancakes: 400 }
+};
+
+// Active sessions
+let sessions = {};
+
+// ===== Functions =====
+function greet(chat) {
+    chat.sendMessage(`👋 Hey! UrbanPixel ${mode} Demo.\nType "help" for options.`);
 }
 
-// -------------------- EVENTS --------------------
-client.on("qr", qr => console.log("Scan this QR code:", qr));
-client.on("ready", () => console.log("🔥 WhatsApp Café Bot is ready!"));
+function sendMenu(chat) {
+    let text = "*Menu:*\n\n*Drinks:*\n";
+    for (const [item, price] of Object.entries(MENU.drinks)) text += `- ${item} — ${price} KES\n`;
+    text += "\n*Food:*\n";
+    for (const [item, price] of Object.entries(MENU.food)) text += `- ${item} — ${price} KES\n`;
+    chat.sendMessage(text);
+}
 
-client.on("message", async msg => {
-    const t = msg.body.toLowerCase();
-    const sender = msg.from;
+function startOrder(chat, userId) {
+    sessions[userId] = { stage: 'choosing_item', items: [] };
+    chat.sendMessage('What would you like to order? (Type exact name from menu)');
+}
 
-    logMessage(sender, msg.body);
+function processOrder(chat, userId, message) {
+    const session = sessions[userId];
+    if (!session) return;
 
-    // ADMIN COMMANDS
-    if (sender === admin) {
-        if (t === "!stats") return msg.reply("📊 Bot running fine. Logs saved.");
-        if (t === "!broadcast") return msg.reply("📢 Broadcast feature coming soon!");
+    if (session.stage === 'choosing_item') {
+        if (MENU.drinks[message] || MENU.food[message]) {
+            session.items.push(message);
+            session.stage = 'choosing_size';
+            chat.sendMessage(`Selected: ${message}. Choose size: Small, Medium, Large.`);
+        } else {
+            chat.sendMessage('Item not found. Please pick from the menu.');
+        }
+    } else if (session.stage === 'choosing_size') {
+        session.items[session.items.length - 1] += ` (${message})`;
+        session.stage = 'payment';
+        chat.sendMessage(`Size ${message} added. Payment? (M-PESA, Cash, Card)`);
+    } else if (session.stage === 'payment') {
+        chat.sendMessage(`Payment via ${message} selected. Order being prepared! ✅`);
+        chat.sendMessage('You can collect it at the counter or await delivery.');
+        delete sessions[userId];
     }
+}
 
-    // MENU REQUEST
-    if (t.includes("menu")) {
-        return msg.reply(
-            "☕ *Coffee*: " + menu.coffee.join(", ") +
-            "\n🍵 *Tea*: " + menu.tea.join(", ") +
-            "\n🍽 *Food*: " + menu.food.join(", ")
-        );
+function startBooking(chat, userId) {
+    sessions[userId] = { stage: 'booking', details: {} };
+    chat.sendMessage('Booking type? (Table, Event Slot)');
+}
+
+function processBooking(chat, userId, message) {
+    const session = sessions[userId];
+    if (!session) return;
+
+    if (session.stage === 'booking') {
+        session.details.type = message;
+        session.stage = 'time';
+        chat.sendMessage('At what time? (HH:MM)');
+    } else if (session.stage === 'time') {
+        session.details.time = message;
+        session.stage = 'name';
+        chat.sendMessage('Under what name should we reserve it?');
+    } else if (session.stage === 'name') {
+        session.details.name = message;
+        chat.sendMessage(`Booking confirmed!\nType: ${session.details.type}\nTime: ${session.details.time}\nName: ${session.details.name} ✅`);
+        delete sessions[userId];
     }
+}
 
-    // BOOKING FLOW
-    if (t.includes("book")) {
-        return msg.reply(
-            "✨ Booking Request:\n" +
-            "1️⃣ Name\n2️⃣ Date\n3️⃣ Time\n4️⃣ Number of people\n" +
-            "Please reply in this format."
-        );
+function handoff(chat) {
+    chat.sendMessage('Connecting to a human agent...');
+    chat.sendMessage('@StaffName has joined 💬'); // placeholder
+}
+
+function toggleMode(chat) {
+    mode = mode === 'WhatsApp' ? 'Instagram' : 'WhatsApp';
+    chat.sendMessage(`Mode switched to ${mode}.`);
+}
+
+// ===== Message handler =====
+client.on('message', async msg => {
+    const chat = await msg.getChat();
+    const userId = msg.from;
+    const text = msg.body.trim().toLowerCase();
+
+    if (text.includes('menu')) sendMenu(chat);
+    else if (text.includes('order')) startOrder(chat, userId);
+    else if (text.includes('booking')) startBooking(chat, userId);
+    else if (text.includes('handoff')) handoff(chat);
+    else if (text.includes('switch')) toggleMode(chat);
+    else if (text.includes('help') || text.includes('hi')) greet(chat);
+    else if (sessions[userId] && sessions[userId].stage) {
+        if (sessions[userId].stage.startsWith('booking')) processBooking(chat, userId, msg.body.trim());
+        else processOrder(chat, userId, msg.body.trim());
+    } else {
+        // fallback AI response
+        try {
+            const response = await openai.createChatCompletion({
+                model: "gpt-3.5-turbo",
+                messages: [{ role: "user", content: msg.body }]
+            });
+            chat.sendMessage(response.data.choices[0].message.content);
+        } catch {
+            chat.sendMessage('Sorry, I couldn’t process your message.');
+        }
     }
-
-    // ORDER FLOW
-    if (t.includes("order")) {
-        return msg.reply("👍 Sure! What would you like to order today?");
-    }
-
-    // HUMAN HANDOFF
-    if (t.includes("human") || t.includes("staff")) {
-        return msg.reply("Connecting you to a human agent... 👤\nDaniel (Staff) has joined 💬");
-    }
-
-    // AI RESPONSE
-    const aiReply = await askAI(msg.body);
-    msg.reply(aiReply);
 });
 
-// ERROR HANDLING
-client.on("auth_failure", () => console.log("❌ Auth failed"));
-client.on("disconnected", () => console.log("❌ Bot disconnected"));
+// Initialize bot
+client.initialize();// UrbanPixel Complete WhatsApp/Instagram Bot Demo
 
-// -------------------- START CLIENT --------------------
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const qrcode = require('qrcode-terminal');
+const { Configuration, OpenAIApi } = require('openai');
+
+// Load API key from environment
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+// OpenAI setup
+const openai = new OpenAIApi(new Configuration({ apiKey: OPENAI_API_KEY }));
+
+// Puppeteer configuration for Replit
+const client = new Client({
+    authStrategy: new LocalAuth(),
+    puppeteer: {
+        headless: true,
+        executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium-browser',
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+    }
+});
+
+// QR code for WhatsApp login
+client.on('qr', qr => {
+    qrcode.generate(qr, { small: true });
+    console.log('Scan this QR code with WhatsApp to connect!');
+});
+
+// Bot ready
+client.on('ready', () => console.log('Bot is ready! ✅'));
+
+// Demo mode
+let mode = 'WhatsApp';
+
+// Menu
+const MENU = {
+    drinks: { Latte: 250, Cappuccino: 220, Mocha: 300, Espresso: 200 },
+    food: { Croissant: 180, Sandwich: 350, Pancakes: 400 }
+};
+
+// Active sessions
+let sessions = {};
+
+// ===== Functions =====
+function greet(chat) {
+    chat.sendMessage(`👋 Hey! UrbanPixel ${mode} Demo.\nType "help" for options.`);
+}
+
+function sendMenu(chat) {
+    let text = "*Menu:*\n\n*Drinks:*\n";
+    for (const [item, price] of Object.entries(MENU.drinks)) text += `- ${item} — ${price} KES\n`;
+    text += "\n*Food:*\n";
+    for (const [item, price] of Object.entries(MENU.food)) text += `- ${item} — ${price} KES\n`;
+    chat.sendMessage(text);
+}
+
+function startOrder(chat, userId) {
+    sessions[userId] = { stage: 'choosing_item', items: [] };
+    chat.sendMessage('What would you like to order? (Type exact name from menu)');
+}
+
+function processOrder(chat, userId, message) {
+    const session = sessions[userId];
+    if (!session) return;
+
+    if (session.stage === 'choosing_item') {
+        if (MENU.drinks[message] || MENU.food[message]) {
+            session.items.push(message);
+            session.stage = 'choosing_size';
+            chat.sendMessage(`Selected: ${message}. Choose size: Small, Medium, Large.`);
+        } else {
+            chat.sendMessage('Item not found. Please pick from the menu.');
+        }
+    } else if (session.stage === 'choosing_size') {
+        session.items[session.items.length - 1] += ` (${message})`;
+        session.stage = 'payment';
+        chat.sendMessage(`Size ${message} added. Payment? (M-PESA, Cash, Card)`);
+    } else if (session.stage === 'payment') {
+        chat.sendMessage(`Payment via ${message} selected. Order being prepared! ✅`);
+        chat.sendMessage('You can collect it at the counter or await delivery.');
+        delete sessions[userId];
+    }
+}
+
+function startBooking(chat, userId) {
+    sessions[userId] = { stage: 'booking', details: {} };
+    chat.sendMessage('Booking type? (Table, Event Slot)');
+}
+
+function processBooking(chat, userId, message) {
+    const session = sessions[userId];
+    if (!session) return;
+
+    if (session.stage === 'booking') {
+        session.details.type = message;
+        session.stage = 'time';
+        chat.sendMessage('At what time? (HH:MM)');
+    } else if (session.stage === 'time') {
+        session.details.time = message;
+        session.stage = 'name';
+        chat.sendMessage('Under what name should we reserve it?');
+    } else if (session.stage === 'name') {
+        session.details.name = message;
+        chat.sendMessage(`Booking confirmed!\nType: ${session.details.type}\nTime: ${session.details.time}\nName: ${session.details.name} ✅`);
+        delete sessions[userId];
+    }
+}
+
+function handoff(chat) {
+    chat.sendMessage('Connecting to a human agent...');
+    chat.sendMessage('@StaffName has joined 💬'); // placeholder
+}
+
+function toggleMode(chat) {
+    mode = mode === 'WhatsApp' ? 'Instagram' : 'WhatsApp';
+    chat.sendMessage(`Mode switched to ${mode}.`);
+}
+
+// ===== Message handler =====
+client.on('message', async msg => {
+    const chat = await msg.getChat();
+    const userId = msg.from;
+    const text = msg.body.trim().toLowerCase();
+
+    if (text.includes('menu')) sendMenu(chat);
+    else if (text.includes('order')) startOrder(chat, userId);
+    else if (text.includes('booking')) startBooking(chat, userId);
+    else if (text.includes('handoff')) handoff(chat);
+    else if (text.includes('switch')) toggleMode(chat);
+    else if (text.includes('help') || text.includes('hi')) greet(chat);
+    else if (sessions[userId] && sessions[userId].stage) {
+        if (sessions[userId].stage.startsWith('booking')) processBooking(chat, userId, msg.body.trim());
+        else processOrder(chat, userId, msg.body.trim());
+    } else {
+        // fallback AI response
+        try {
+            const response = await openai.createChatCompletion({
+                model: "gpt-3.5-turbo",
+                messages: [{ role: "user", content: msg.body }]
+            });
+            chat.sendMessage(response.data.choices[0].message.content);
+        } catch {
+            chat.sendMessage('Sorry, I couldn’t process your message.');
+        }
+    }
+});
+
+// Initialize bot
 client.initialize();
